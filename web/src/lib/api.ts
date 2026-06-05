@@ -363,9 +363,35 @@ export class ApiClient {
 
   async confirmImport(
     eventId: string,
-    data: { column_mapping: Record<string, string>; attendees_data: unknown[] }
+    file: File,
+    columnMappings: Record<string, string>,
+    skipDuplicates: boolean = true,
   ) {
-    return this.request('POST', `/v1/events/${eventId}/attendees/import-confirm`, data);
+    // Multipart POST: the backend re-parses the xlsx, so the file is
+    // re-uploaded here. column_mappings is JSON-encoded into a form field.
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('column_mappings', JSON.stringify(columnMappings));
+    formData.append('skip_duplicates', String(skipDuplicates));
+
+    const token = this.getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(
+      `${API_BASE}/v1/events/${eventId}/attendees/import-confirm`,
+      { method: 'POST', headers, body: formData },
+    );
+
+    if (response.status === 401) {
+      localStorage.removeItem('token');
+      window.location.href = '/login';
+      throw new Error('Unauthorized');
+    }
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response, response.status));
+    }
+    return safeJson(response, 'import confirm');
   }
 
   // Seats

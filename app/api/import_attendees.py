@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 
 from app.api.auth import get_current_organizer
 from app.deps import get_import_service
-from app.schemas.import_preview import (
-    ImportConfirmRequest,
-    ImportPreviewResponse,
-)
+from app.schemas.import_preview import ImportPreviewResponse
 from app.services.import_service import ImportService
 
 logger = logging.getLogger(__name__)
@@ -68,7 +66,15 @@ async def import_preview(
 async def import_confirm(
     event_id: uuid.UUID,
     file: UploadFile,
-    body: ImportConfirmRequest = Depends(),
+    # column_mappings comes in as a JSON-encoded string in a form field.
+    # The previous `body: ImportConfirmRequest = Depends()` pattern doesn't
+    # work with multipart/form-data — Pydantic models via Depends() try to
+    # read fields from query params, not form fields.
+    column_mappings: str = Form(
+        "{}",
+        description="JSON-encoded {excel_header: attendee_field} mapping",
+    ),
+    skip_duplicates: bool = Form(True),
     organizer=Depends(get_current_organizer),
     svc: ImportService = Depends(get_import_service),
 ):
@@ -76,13 +82,26 @@ async def import_confirm(
 
     Same error-shaping policy as ``import_preview`` — always JSON response.
     """
+    try:
+        mappings = json.loads(column_mappings) if column_mappings else {}
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"column_mappings 不是有效 JSON: {e}",
+        ) from e
+    if not isinstance(mappings, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="column_mappings 必须是 JSON object",
+        )
+
     content = await file.read()
     try:
         result = await svc.confirm_import(
             event_id=event_id,
             file_bytes=content,
-            column_mappings=body.column_mappings,
-            skip_duplicates=body.skip_duplicates,
+            column_mappings=mappings,
+            skip_duplicates=skip_duplicates,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
