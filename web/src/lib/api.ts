@@ -441,9 +441,23 @@ export class ApiClient {
 
   async bulkUpdateSeats(
     eventId: string,
-    body: { seat_ids: string[]; zone?: string | null; seat_type?: string },
+    body: {
+      seat_ids: string[];
+      zone?: string | null;
+      seat_type?: string;
+      pos_dx?: number;
+      pos_dy?: number;
+    },
   ) {
     return this.request('PATCH', `/events/${eventId}/seats/bulk`, body);
+  }
+
+  async bulkDeleteSeats(eventId: string, seatIds: string[]) {
+    return this.request<{ deleted: number }>(
+      'DELETE',
+      `/events/${eventId}/seats/bulk`,
+      { seat_ids: seatIds },
+    );
   }
 
   // ── Venue Areas ───────────────────────────────────────────

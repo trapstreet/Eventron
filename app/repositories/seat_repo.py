@@ -3,7 +3,7 @@
 import uuid
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from app.models.seat import Seat
 from app.repositories.base import BaseRepository
@@ -146,6 +146,44 @@ class SeatRepository(BaseRepository[Seat]):
             .where(Seat.id.in_(seat_ids))
             .values(seat_type=seat_type)
         )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.rowcount  # type: ignore[return-value]
+
+    async def bulk_shift(
+        self,
+        seat_ids: list[uuid.UUID],
+        dx: float,
+        dy: float,
+    ) -> int:
+        """Translate `pos_x`/`pos_y` by `(dx, dy)` for each listed seat.
+
+        Used by the area-drag UX: when the user drops a venue area in a
+        new spot, every seat inside gets shifted by the same delta so
+        the visual layout follows the move.
+        """
+        if not seat_ids or (dx == 0 and dy == 0):
+            return 0
+        stmt = (
+            update(Seat)
+            .where(Seat.id.in_(seat_ids))
+            .values(
+                pos_x=Seat.pos_x + dx,
+                pos_y=Seat.pos_y + dy,
+            )
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.rowcount  # type: ignore[return-value]
+
+    async def bulk_delete(self, seat_ids: list[uuid.UUID]) -> int:
+        """Delete every seat whose id is in `seat_ids`.
+
+        Drag-select → 删除 UX. Missing IDs are skipped silently.
+        """
+        if not seat_ids:
+            return 0
+        stmt = delete(Seat).where(Seat.id.in_(seat_ids))
         result = await self._session.execute(stmt)
         await self._session.flush()
         return result.rowcount  # type: ignore[return-value]

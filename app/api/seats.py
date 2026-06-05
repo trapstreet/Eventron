@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.deps import get_attendee_service, get_event_service, get_seating_service
 from app.schemas.seat import (
     AutoAssignRequest,
+    BulkSeatDelete,
     BulkSeatUpdate,
     CustomLayoutRequest,
     LayoutRequest,
@@ -150,9 +151,20 @@ async def bulk_update_seats(
     body: BulkSeatUpdate,
     svc: SeatingService = Depends(get_seating_service),
 ):
-    """Bulk-update zone or type on multiple seats (drag-select painting)."""
+    """Bulk-update zone / type / position-delta on multiple seats.
+
+    Dispatch order: position-delta first (it's used by the area-drag UX
+    and may be combined with zone/type re-assignment on a future change),
+    then zone/type. Caller usually supplies exactly one of the three.
+    """
     updated = 0
-    if body.zone is not None:
+    if body.pos_dx is not None or body.pos_dy is not None:
+        updated = await svc.bulk_shift_seats(
+            body.seat_ids,
+            dx=body.pos_dx or 0.0,
+            dy=body.pos_dy or 0.0,
+        )
+    elif body.zone is not None:
         updated = await svc.bulk_update_zone(body.seat_ids, body.zone)
     elif body.seat_type is not None:
         updated = await svc.bulk_update_type(body.seat_ids, body.seat_type)
@@ -160,6 +172,21 @@ async def bulk_update_seats(
         # Clear zone (set to None)
         updated = await svc.bulk_update_zone(body.seat_ids, None)
     return {"updated": updated}
+
+
+@router.delete("/{event_id}/seats/bulk")
+async def bulk_delete_seats(
+    event_id: uuid.UUID,
+    body: BulkSeatDelete,
+    svc: SeatingService = Depends(get_seating_service),
+):
+    """Bulk-delete the given seats (drag-select → 删除 UX).
+
+    Returns the number actually deleted; missing IDs are silently skipped
+    (the UI optimistically removed them locally).
+    """
+    deleted = await svc.bulk_delete_seats(body.seat_ids)
+    return {"deleted": deleted}
 
 
 @router.patch("/{event_id}/seats/{seat_id}", response_model=SeatResponse)

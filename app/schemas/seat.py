@@ -60,6 +60,17 @@ class BulkSeatUpdate(BaseModel):
     seat_type: Optional[str] = Field(
         None, pattern=r"^(normal|reserved|disabled|aisle)$"
     )
+    # Translate all listed seats by the same delta. Used by the area-drag UX:
+    # the frontend moves a whole area's seats by `(pos_dx, pos_dy)` after the
+    # user drops the area rectangle.
+    pos_dx: Optional[float] = None
+    pos_dy: Optional[float] = None
+
+
+class BulkSeatDelete(BaseModel):
+    """Bulk-delete multiple seats at once (drag-select → delete UX)."""
+
+    seat_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=5000)
 
 
 class LayoutRequest(BaseModel):

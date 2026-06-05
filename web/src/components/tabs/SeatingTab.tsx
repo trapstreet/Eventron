@@ -188,6 +188,30 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
   // Tool mode: 'select' | 'pan'
   const [toolMode, setToolMode] = useState<'select' | 'pan'>('select');
 
+  // Multi-select set populated by drag-select in 'select' mode (NOT paint
+  // mode — paint-mode drag immediately fires the zone bulk-update instead).
+  // When non-empty, a floating action bar surfaces "删除 / 清除".
+  const [selectedSeatIds, setSelectedSeatIds] = useState<Set<string>>(new Set());
+  const selectedSeatIdsRef = useRef(selectedSeatIds);
+  useEffect(() => { selectedSeatIdsRef.current = selectedSeatIds; }, [selectedSeatIds]);
+
+  // Area drag — set while the user drags an area's boundary rect.
+  // `delta` is updated live so we can translate the visual ghost during
+  // the drag; on mouseup we PATCH the area + bulk-shift its seats.
+  //
+  // Why two refs + one state: the document listeners are bound once
+  // and read live data via refs (no re-binding); React state is just
+  // for rendering the ghost translation.
+  const [areaDrag, setAreaDrag] = useState<{
+    areaId: string;
+    delta: { dx: number; dy: number };
+  } | null>(null);
+  const areaDragRef = useRef<{
+    areaId: string;
+    startSvg: { x: number; y: number };
+  } | null>(null);
+  const areaDragDeltaRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
+
   const svgRef = useRef<SVGSVGElement>(null);
   const queryClient = useQueryClient();
 
@@ -300,11 +324,25 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
   // ── area mutations ──
   const createAreaMutation = useMutation({
     mutationFn: async () => {
+      // Stack new areas below existing seats so they don't pile up at
+      // (0,0) and overlap. Picks the largest pos_y of every current seat,
+      // pads a gap, and uses that as offset_y. Existing areas with their
+      // own offset still get respected because seat pos already includes
+      // their offset.
+      const existing = seats as Seat[];
+      let offsetY = 0;
+      if (existing.length > 0) {
+        const maxY = Math.max(
+          ...existing.map((s) => s.pos_y ?? (s.row_num - 1) * 60),
+        );
+        offsetY = maxY + 200;
+      }
       const area = await apiClient.createArea(eventId, {
         name: newAreaName,
         layout_type: newAreaLayout,
         rows: newAreaRows,
         cols: newAreaCols,
+        offset_y: offsetY,
         stage_label: newAreaStage || null,
       });
       // Auto-generate layout for this area
@@ -316,6 +354,48 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
       queryClient.invalidateQueries({ queryKey: ['seats', eventId] });
       setNewAreaName('');
       setNewAreaStage('');
+    },
+  });
+
+  // Bulk delete — for drag-select → 删除 UX.
+  const bulkDeleteMutation = useMutation({
+    mutationFn: (seatIds: string[]) =>
+      apiClient.bulkDeleteSeats(eventId, seatIds),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['seats', eventId] });
+      setSelectedSeatIds(new Set());
+    },
+  });
+
+  // Area drag → shift all seats in the area by (dx, dy) + update the
+  // area's stored offset so subsequent layout-regenerations land in the
+  // new position.
+  const areaShiftMutation = useMutation({
+    mutationFn: async ({
+      areaId, dx, dy,
+    }: { areaId: string; dx: number; dy: number }) => {
+      if (dx === 0 && dy === 0) return;
+      const seatIds = (seats as Seat[])
+        .filter((s) => s.area_id === areaId)
+        .map((s) => s.id);
+      if (seatIds.length > 0) {
+        await apiClient.bulkUpdateSeats(eventId, {
+          seat_ids: seatIds,
+          pos_dx: dx,
+          pos_dy: dy,
+        });
+      }
+      const area = (areas as VenueArea[]).find((a) => a.id === areaId);
+      if (area) {
+        await apiClient.updateArea(eventId, areaId, {
+          offset_x: (area.offset_x ?? 0) + dx,
+          offset_y: (area.offset_y ?? 0) + dy,
+        });
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['seats', eventId] });
+      queryClient.invalidateQueries({ queryKey: ['areas', eventId] });
     },
   });
 
@@ -504,9 +584,13 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
   useEffect(() => { paintModeRef.current = paintMode; }, [paintMode]);
   useEffect(() => { paintZoneRef.current = paintZone; }, [paintZone]);
   useEffect(() => { seatsRef.current = seats; }, [seats]);
-  // Stable ref for mutate so document listeners don't depend on mutation object
+  // Stable refs for mutate so document listeners don't depend on mutation object
   const bulkMutateRef = useRef(bulkUpdateMutation.mutate);
   useEffect(() => { bulkMutateRef.current = bulkUpdateMutation.mutate; }, [bulkUpdateMutation.mutate]);
+  const areaShiftMutateRef = useRef(areaShiftMutation.mutate);
+  useEffect(() => {
+    areaShiftMutateRef.current = areaShiftMutation.mutate;
+  }, [areaShiftMutation.mutate]);
 
   // Helper: find seats in a selection rect
   const findSeatsInRect = useCallback(
@@ -549,14 +633,32 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
         };
         return;
       }
-      // Paint mode only → start drag selection for bulk zone painting
-      if (paintModeRef.current) {
+      // Drag-select: starts both in paint mode (bulk zone painting on
+      // mouseup) AND in plain 'select' mode (populates selectedSeatIds
+      // for the floating "删除/清除" action bar).
+      if (paintModeRef.current || toolModeRef.current === 'select') {
         const pt = svgPoint(e.clientX, e.clientY);
         selStart.current = pt;
         const initRect = { x: pt.x, y: pt.y, w: 0, h: 0 };
         selRectRef.current = initRect;
         setSelRect(initRect);
       }
+    },
+    [svgPoint],
+  );
+
+  // Area-boundary mousedown: starts area drag. Document-level listeners
+  // handle move + up. Stops propagation so the SVG-level handler doesn't
+  // also start a pan / drag-select.
+  const handleAreaMouseDown = useCallback(
+    (areaId: string, e: React.MouseEvent) => {
+      // Only left-click; middle/right still pan via SVG handler
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const start = svgPoint(e.clientX, e.clientY);
+      areaDragRef.current = { areaId, startSvg: start };
+      setAreaDrag({ areaId, delta: { dx: 0, dy: 0 } });
     },
     [svgPoint],
   );
@@ -571,6 +673,15 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
         const dx = (e.clientX - panStart.current.x) / z;
         const dy = (e.clientY - panStart.current.y) / z;
         setPan({ x: panStart.current.px + dx, y: panStart.current.py + dy });
+        return;
+      }
+      // Area dragging — visual only; mouseup persists.
+      if (areaDragRef.current) {
+        const cur = svgPoint(e.clientX, e.clientY);
+        const dx = cur.x - areaDragRef.current.startSvg.x;
+        const dy = cur.y - areaDragRef.current.startSvg.y;
+        areaDragDeltaRef.current = { dx, dy };
+        setAreaDrag({ areaId: areaDragRef.current.areaId, delta: { dx, dy } });
         return;
       }
       if (selStart.current) {
@@ -594,16 +705,34 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
         setIsPanning(false);
         return;
       }
+      // Area drag landed — commit shift if non-trivial.
+      if (areaDragRef.current) {
+        const { areaId } = areaDragRef.current;
+        const { dx, dy } = areaDragDeltaRef.current;
+        areaDragRef.current = null;
+        areaDragDeltaRef.current = { dx: 0, dy: 0 };
+        setAreaDrag(null);
+        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+          areaShiftMutateRef.current({ areaId, dx, dy });
+        }
+        return;
+      }
       if (selStart.current) {
         // Read final rect from ref (not from React state — avoids stale closure)
         const finalRect = selRectRef.current;
         if (finalRect && (finalRect.w > 3 || finalRect.h > 3)) {
           const selected = findSeatsInRect(finalRect);
-          if (selected.length > 0 && paintModeRef.current) {
-            bulkMutateRef.current({
-              seat_ids: selected.map((s) => s.id),
-              zone: paintZoneRef.current || null,
-            });
+          if (selected.length > 0) {
+            if (paintModeRef.current) {
+              // Paint mode → bulk paint zone
+              bulkMutateRef.current({
+                seat_ids: selected.map((s) => s.id),
+                zone: paintZoneRef.current || null,
+              });
+            } else if (toolModeRef.current === 'select') {
+              // Select mode → add to multi-select set (replaces existing)
+              setSelectedSeatIds(new Set(selected.map((s) => s.id)));
+            }
           }
         }
         // Clean up
@@ -619,6 +748,8 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
     };
+    // All live state read via refs; only svgPoint / setPan / findSeatsInRect
+    // are deps. Effect attaches the listeners exactly once.
   }, [svgPoint, setPan, findSeatsInRect]);
 
   // ── Zoom: native wheel listener (non-passive) + zoom toward cursor ──
@@ -738,20 +869,33 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
             const ry = ab.minY - pad - 16;
             const rw = ab.maxX - ab.minX + pad * 2;
             const rh = ab.maxY - ab.minY + pad * 2 + 16;
+            const dragging = areaDrag?.areaId === areaId;
+            const tx = dragging ? areaDrag.delta.dx : 0;
+            const ty = dragging ? areaDrag.delta.dy : 0;
             return (
-              <g key={`area-${areaId}`}>
-                {/* Area boundary */}
+              <g
+                key={`area-${areaId}`}
+                transform={dragging ? `translate(${tx}, ${ty})` : undefined}
+                style={{ opacity: dragging ? 0.7 : 1 }}
+              >
+                {/* Area boundary — also the drag handle. Pointer-events
+                    `stroke` means clicks on the dashed border start a drag,
+                    but clicks INSIDE the rect fall through to seats below. */}
                 <rect
                   x={rx} y={ry} width={rw} height={rh}
-                  rx={6} fill="none"
-                  stroke="#cbd5e1" strokeWidth={1}
+                  rx={6} fill="transparent"
+                  stroke="#cbd5e1" strokeWidth={6}
                   strokeDasharray="8,4"
+                  style={{ cursor: 'move', pointerEvents: 'stroke' }}
+                  onMouseDown={(e) => handleAreaMouseDown(areaId, e)}
                 />
-                {/* Area name label */}
+                {/* Area name label — also draggable */}
                 <text
                   x={rx + 6} y={ry + 12}
                   fontSize={11} fontWeight="600"
                   fill="#64748b"
+                  style={{ cursor: 'move', userSelect: 'none' }}
+                  onMouseDown={(e) => handleAreaMouseDown(areaId, e)}
                 >
                   {ab.area.name}
                 </text>
@@ -800,15 +944,22 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
 
           {/* Seats */}
           {(seats as Seat[]).map((seat) => {
-            const x = seat.pos_x ?? (seat.col_num - 1) * 60;
-            const y = seat.pos_y ?? (seat.row_num - 1) * 60;
+            let x = seat.pos_x ?? (seat.col_num - 1) * 60;
+            let y = seat.pos_y ?? (seat.row_num - 1) * 60;
+            // Follow the in-flight area drag: seats in the dragging area
+            // visually translate by the same delta as the boundary rect.
+            if (areaDrag && seat.area_id === areaDrag.areaId) {
+              x += areaDrag.delta.dx;
+              y += areaDrag.delta.dy;
+            }
             if (seat.seat_type === 'aisle') return null;
             const att = seat.attendee_id
               ? attendeeMap.get(seat.attendee_id)
               : undefined;
             const fill = getSeatFill(seat, att, zoneColorMap);
             const stroke = getSeatStroke(seat, att, zoneColorMap);
-            const isSelected = selectedSeat?.id === seat.id;
+            const isSelected =
+              selectedSeat?.id === seat.id || selectedSeatIds.has(seat.id);
             const rotation = seat.rotation || 0;
             const displayLabel = seat.attendee_id
               ? (att?.name?.slice(0, 3) || '✓')
@@ -1498,6 +1649,35 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
             </div>
           ) : (
             renderSVGCanvas()
+          )}
+
+          {/* Multi-select action bar — appears when drag-select in 'select'
+              mode picked up any seats. Floats over the bottom of the canvas. */}
+          {selectedSeatIds.size > 0 && !paintMode && (
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-white rounded-full shadow-lg border border-gray-200 px-3 py-2 text-sm z-10">
+              <span className="text-gray-700 font-medium">
+                已选 {selectedSeatIds.size} 个座位
+              </span>
+              <button
+                onClick={() => {
+                  if (
+                    confirm(`确定删除选中的 ${selectedSeatIds.size} 个座位？`)
+                  ) {
+                    bulkDeleteMutation.mutate(Array.from(selectedSeatIds));
+                  }
+                }}
+                disabled={bulkDeleteMutation.isPending}
+                className="px-3 py-1 bg-red-600 text-white rounded-full font-medium hover:bg-red-700 disabled:opacity-50"
+              >
+                {bulkDeleteMutation.isPending ? '删除中…' : '删除'}
+              </button>
+              <button
+                onClick={() => setSelectedSeatIds(new Set())}
+                className="px-3 py-1 border border-gray-200 text-gray-600 rounded-full hover:bg-gray-50"
+              >
+                清除
+              </button>
+            </div>
           )}
         </div>
 

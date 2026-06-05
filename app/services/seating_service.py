@@ -224,6 +224,25 @@ class SeatingService:
         """Set seat_type on multiple seats."""
         return await self._seat_repo.bulk_update_type(seat_ids, seat_type)
 
+    async def bulk_shift_seats(
+        self,
+        seat_ids: list[uuid.UUID],
+        dx: float,
+        dy: float,
+    ) -> int:
+        """Translate ``pos_x``/``pos_y`` on every listed seat by ``(dx, dy)``.
+
+        Drives the area-drag UX — moving an area shifts all its seats.
+        """
+        return await self._seat_repo.bulk_shift(seat_ids, dx, dy)
+
+    async def bulk_delete_seats(
+        self,
+        seat_ids: list[uuid.UUID],
+    ) -> int:
+        """Delete every seat in ``seat_ids``."""
+        return await self._seat_repo.bulk_delete(seat_ids)
+
     # ------------------------------------------------------------------
     # Single-seat operations
     # ------------------------------------------------------------------
