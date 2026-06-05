@@ -18,7 +18,7 @@ router = APIRouter()
 
 
 @router.post(
-    "/{event_id}/attendees/import-preview",
+    "/events/{event_id}/attendees/import-preview",
     response_model=ImportPreviewResponse,
 )
 async def import_preview(
@@ -39,7 +39,7 @@ async def import_preview(
     return ImportPreviewResponse(**result)
 
 
-@router.post("/{event_id}/attendees/import-confirm")
+@router.post("/events/{event_id}/attendees/import-confirm")
 async def import_confirm(
     event_id: uuid.UUID,
     file: UploadFile,
