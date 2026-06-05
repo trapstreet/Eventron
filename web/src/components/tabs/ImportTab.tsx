@@ -7,16 +7,22 @@ interface ImportTabProps {
   eventId: string;
 }
 
+// Matches the backend ImportPreviewResponse shape (see app/schemas/import_preview.py).
+interface ColumnMapping {
+  excel_header: string;
+  mapped_to: string | null;
+  confidence: number;
+}
 interface PreviewData {
-  detected_columns: Record<string, string>;
-  preview_rows: any[];
-  duplicates: any[];
+  total_rows: number;
+  column_mappings: ColumnMapping[];
+  sample_rows: Record<string, unknown>[];
+  warnings: string[];
 }
 
 export function ImportTab({ eventId }: ImportTabProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
-  const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
   const [error, setError] = useState('');
   const queryClient = useQueryClient();
 
@@ -25,8 +31,7 @@ export function ImportTab({ eventId }: ImportTabProps) {
       return apiClient.previewImport(eventId, file);
     },
     onSuccess: (data) => {
-      setPreviewData(data as any);
-      setColumnMapping((data as any).detected_columns || {});
+      setPreviewData(data as PreviewData);
       setError('');
     },
     onError: (err) => {
@@ -38,18 +43,21 @@ export function ImportTab({ eventId }: ImportTabProps) {
 
   const confirmMutation = useMutation({
     mutationFn: async () => {
-      if (!previewData) throw new Error('No preview data');
-      return apiClient.confirmImport(eventId, {
-        column_mapping: columnMapping,
-        attendees_data: previewData.preview_rows,
-      });
+      if (!previewData || !selectedFile) throw new Error('No preview data');
+      // Build the column-mapping dict the backend expects from the
+      // auto-detected mappings. Only include columns that mapped to a
+      // known attendee field.
+      const mappings: Record<string, string> = {};
+      for (const m of previewData.column_mappings) {
+        if (m.mapped_to) mappings[m.excel_header] = m.mapped_to;
+      }
+      return apiClient.confirmImport(eventId, selectedFile, mappings, true);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['attendees'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
       setSelectedFile(null);
       setPreviewData(null);
-      setColumnMapping({});
       setError('');
       alert('导入成功！');
     },
@@ -64,13 +72,6 @@ export function ImportTab({ eventId }: ImportTabProps) {
     previewMutation.mutate(file);
   };
 
-  const handleColumnMappingChange = (column: string, value: string) => {
-    setColumnMapping({
-      ...columnMapping,
-      [column]: value,
-    });
-  };
-
   const handleConfirmImport = () => {
     if (confirm('确定要导入这些参会人吗？')) {
       confirmMutation.mutate();
@@ -78,43 +79,57 @@ export function ImportTab({ eventId }: ImportTabProps) {
   };
 
   if (previewData) {
+    // Derive the column list to render in the sample table. Use the
+    // mapped fields when known; fall back to the raw excel header for
+    // columns that didn't auto-map.
+    const sampleColumns: { key: string; label: string; mapped: boolean }[] =
+      previewData.column_mappings.map((m) => ({
+        key: m.mapped_to || m.excel_header,
+        label: m.excel_header,
+        mapped: !!m.mapped_to,
+      }));
+
     return (
       <div className="space-y-4">
-        {/* Warning */}
-        {previewData.duplicates && previewData.duplicates.length > 0 && (
+        {/* Warnings — backend returns these as strings (duplicates, blanks, etc.) */}
+        {previewData.warnings && previewData.warnings.length > 0 && (
           <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg flex gap-3">
             <AlertCircle className="text-yellow-600 flex-shrink-0" size={20} />
-            <div>
-              <p className="font-medium text-yellow-900">检测到重复数据</p>
-              <p className="text-sm text-yellow-700">
-                发现 {previewData.duplicates.length} 条可能的重复记录
-              </p>
+            <div className="text-sm text-yellow-800 space-y-1">
+              <p className="font-medium">需要注意 ({previewData.warnings.length} 项)</p>
+              <ul className="list-disc list-inside text-yellow-700 max-h-32 overflow-y-auto">
+                {previewData.warnings.slice(0, 20).map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+              {previewData.warnings.length > 20 && (
+                <p className="text-xs">…还有 {previewData.warnings.length - 20} 条</p>
+              )}
             </div>
           </div>
         )}
 
-        {/* Column Mapping */}
+        {/* Column Mapping — read-only display of auto-detected mappings */}
         <div className="bg-white rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">列映射设置</h3>
-          <div className="space-y-4">
-            {Object.entries(previewData.detected_columns).map(([fileCol, mappedCol]) => (
-              <div key={fileCol} className="grid grid-cols-3 gap-4 items-center">
-                <div>
-                  <label className="text-sm font-medium text-gray-700">
-                    文件列: {fileCol}
-                  </label>
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">列映射（自动识别）</h3>
+          <div className="space-y-2">
+            {previewData.column_mappings.map((m) => (
+              <div key={m.excel_header} className="grid grid-cols-12 gap-3 items-center text-sm">
+                <div className="col-span-5 text-gray-700 font-mono">{m.excel_header}</div>
+                <div className="col-span-1 text-center text-gray-400">→</div>
+                <div className="col-span-4 font-mono">
+                  {m.mapped_to ? (
+                    <span className="text-gray-900">{m.mapped_to}</span>
+                  ) : (
+                    <span className="text-gray-400 italic">（不映射）</span>
+                  )}
                 </div>
-                <div className="text-center text-gray-500">→</div>
-                <div>
-                  <input
-                    type="text"
-                    value={columnMapping[fileCol] || mappedCol}
-                    onChange={(e) =>
-                      handleColumnMappingChange(fileCol, e.target.value)
-                    }
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder="输入映射的列名"
-                  />
+                <div className="col-span-2 text-right">
+                  {m.mapped_to && (
+                    <span className="text-xs text-gray-500">
+                      置信 {(m.confidence * 100).toFixed(0)}%
+                    </span>
+                  )}
                 </div>
               </div>
             ))}
@@ -124,31 +139,32 @@ export function ImportTab({ eventId }: ImportTabProps) {
         {/* Preview */}
         <div className="bg-white rounded-lg shadow p-6">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">
-            预览数据 ({previewData.preview_rows.length} 行)
+            预览数据（共 {previewData.total_rows} 行，显示前 {previewData.sample_rows.length} 行）
           </h3>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
-                  {Object.keys(previewData.detected_columns).map((col) => (
+                  {sampleColumns.map((c) => (
                     <th
-                      key={col}
-                      className="px-4 py-2 text-left font-medium text-gray-900"
+                      key={c.key}
+                      className={`px-4 py-2 text-left font-medium ${c.mapped ? 'text-gray-900' : 'text-gray-400'}`}
+                      title={c.mapped ? `→ ${c.key}` : '未映射，不会导入'}
                     >
-                      {col}
+                      {c.label}
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {previewData.preview_rows.slice(0, 10).map((row, idx) => (
+                {previewData.sample_rows.map((row, idx) => (
                   <tr key={idx} className="hover:bg-gray-50">
-                    {Object.keys(previewData.detected_columns).map((col) => (
+                    {sampleColumns.map((c) => (
                       <td
-                        key={`${idx}-${col}`}
+                        key={`${idx}-${c.key}`}
                         className="px-4 py-2 text-gray-600"
                       >
-                        {row[col] || '-'}
+                        {String(row[c.key] ?? '') || '-'}
                       </td>
                     ))}
                   </tr>
@@ -156,11 +172,6 @@ export function ImportTab({ eventId }: ImportTabProps) {
               </tbody>
             </table>
           </div>
-          {previewData.preview_rows.length > 10 && (
-            <p className="text-xs text-gray-500 mt-2">
-              显示前 10 行，共 {previewData.preview_rows.length} 行
-            </p>
-          )}
         </div>
 
         {/* Actions */}
