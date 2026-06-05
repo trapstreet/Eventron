@@ -64,8 +64,11 @@ def _detect_duplicates(
     seen: dict[str, int] = {}
 
     for i, row in enumerate(rows):
-        name = row.get("name", "").strip()
-        org = row.get("organization", "").strip()
+        # `.get(k, "")` doesn't substitute "" when the key exists with a
+        # None value (which is exactly what excel_io writes when a cell
+        # is blank). Use `or ""` so None | "" both produce "".
+        name = (row.get("name") or "").strip()
+        org = (row.get("organization") or "").strip()
         key = f"{name}|{org}" if org else name
 
         if key in seen:
@@ -113,8 +116,8 @@ class ImportService:
         existing_names = {a.name for a in existing}
         warnings = _detect_duplicates(rows, existing_names)
 
-        # Rows missing a name
-        nameless = sum(1 for r in rows if not r.get("name", "").strip())
+        # Rows missing a name (excel_io writes None for blank cells, not "")
+        nameless = sum(1 for r in rows if not (r.get("name") or "").strip())
         if nameless > 0:
             warnings.insert(0, f"{nameless} rows have empty name field")
 
@@ -152,7 +155,7 @@ class ImportService:
                 if field_name and excel_header in raw_row:
                     mapped[field_name] = raw_row[excel_header]
 
-            name = mapped.get("name", "").strip()
+            name = (mapped.get("name") or "").strip()
             if not name:
                 errors.append(f"Row {i + 1}: missing name, skipped")
                 skipped += 1
@@ -165,7 +168,7 @@ class ImportService:
             # Build create kwargs — only include valid attendee fields
             create_kwargs: dict = {"event_id": event_id, "name": name}
             for field in ("title", "organization", "department", "role", "phone", "email"):
-                val = mapped.get(field, "").strip() if mapped.get(field) else ""
+                val = (mapped.get(field) or "").strip()
                 if val:
                     create_kwargs[field] = val
 
