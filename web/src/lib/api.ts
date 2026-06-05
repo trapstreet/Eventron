@@ -354,10 +354,11 @@ export class ApiClient {
       throw new Error('Unauthorized');
     }
     if (!response.ok) {
-      const errorData = (await response.json()) as ApiError;
-      throw new Error(errorData.detail || 'Import preview failed');
+      // Use the shared helper so we don't blow up trying to JSON.parse a
+      // plain-text "Internal Server Error" body when the backend 500s.
+      throw new Error(await readErrorMessage(response, response.status));
     }
-    return response.json();
+    return safeJson(response, 'import preview');
   }
 
   async confirmImport(
