@@ -329,8 +329,18 @@ class SeatingService:
     ) -> list[Seat]:
         """Generate seats within a specific area.
 
-        Uses the area's layout_type, rows, cols. Replaces existing
-        seats in this area (not the whole event).
+        Replaces existing seats in this area (not the whole event).
+
+        Per-layout interpretation of ``area.rows`` / ``area.cols``:
+          - grid / theater / classroom / u_shape:
+                rows = number of rows, cols = seats per row
+          - roundtable / banquet:
+                rows = number of TABLES, cols = seats PER TABLE
+            For table layouts we pass ``table_size = cols`` so the engine
+            (which splits ``rows*cols`` total seats into tables of
+            ``table_size``) produces exactly ``rows`` tables of ``cols``
+            seats — i.e. "10桌 × 8人" instead of the old, confusing
+            "rows×cols = total seat count, auto-split into 8-seat tables".
         """
         assert self._area_repo is not None
         area = await self._area_repo.get_by_id(area_id)
@@ -340,10 +350,17 @@ class SeatingService:
         # Delete existing seats in this area
         await self._seat_repo.delete_by_area(area_id)
 
-        specs = generate_layout(
-            area.layout_type, area.rows, area.cols,
-            spacing=46.0,
-        )
+        if area.layout_type in ("roundtable", "banquet"):
+            # cols = seats per table; rows*cols seats split into rows tables.
+            specs = generate_layout(
+                area.layout_type, area.rows, area.cols,
+                spacing=46.0, table_size=max(1, area.cols),
+            )
+        else:
+            specs = generate_layout(
+                area.layout_type, area.rows, area.cols,
+                spacing=46.0,
+            )
 
         # Offset specs by area's offset_x/offset_y
         for s in specs:
