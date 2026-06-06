@@ -93,9 +93,11 @@ def make_seating_tools(
 
         Args:
             layout_type: 布局类型 grid|theater|roundtable|banquet|u_shape|classroom
-            rows: 排数
-            cols: 每排座位数
-            table_size: 每桌人数（仅 roundtable/banquet 用）
+            rows: 排布局（grid/theater/classroom/u_shape）=排数；
+                  桌布局（roundtable/banquet）=**桌数**
+            cols: 排布局=每排座位数；桌布局=**每桌人数**
+                  例：圆桌 10 桌每桌 8 人 → rows=10, cols=8
+            table_size: 已弃用——桌布局的每桌人数现在由 cols 决定，此参数被忽略
             confirm_unusual: 已经核实过"奇怪"维度时设为 True，跳过反思阻拦
         """
         if rows is None or cols is None or rows < 1 or cols < 1:
@@ -137,17 +139,25 @@ def make_seating_tools(
                 "  · 或者用 suggest_venue_dims 让我推荐"
             )
 
+        # For table layouts, cols IS the seats-per-table. Force
+        # table_size=cols so the engine produces exactly `rows` tables of
+        # `cols` seats (rather than splitting rows*cols by a separate,
+        # confusing table_size).
+        is_table = layout_type in ("roundtable", "banquet")
+        effective_table_size = cols if is_table else table_size
+
         seats = await seat_svc.create_venue_layout(
             eid,
             layout_type=layout_type,
             rows=rows,
             cols=cols,
-            table_size=table_size,
+            table_size=effective_table_size,
             replace=True,
         )
+        dim = f"{rows}桌×{cols}人" if is_table else f"{rows}排×{cols}列"
         return (
             f"已创建 {layout_type} 布局: "
-            f"{rows}排×{cols}列, 共 {len(seats)} 个座位"
+            f"{dim}, 共 {len(seats)} 个座位"
         )
 
     @tool
@@ -1179,8 +1189,10 @@ def make_seating_tools(
         Args:
             name: 区域名称，如 "观众席"、"贵宾区"、"贵宾室"
             layout_type: 布局类型 grid|theater|roundtable|banquet|u_shape|classroom
-            rows: 排数
-            cols: 每排座位数
+            rows: 排布局（grid/theater/classroom/u_shape）=排数；
+                  桌布局（roundtable/banquet）=**桌数**
+            cols: 排布局=每排座位数；桌布局=**每桌人数**
+                  例：圆桌 10 桌每桌 8 人 → rows=10, cols=8
             offset_x: 在画布上的水平偏移（多区域时用于错开位置）
             offset_y: 在画布上的垂直偏移
             stage_label: 舞台/讲台标签（可选），如 "舞台"、"主席台"
@@ -1198,8 +1210,10 @@ def make_seating_tools(
             offset_y=offset_y,
             stage_label=stage_label or None,
         )
+        is_table = layout_type in ("roundtable", "banquet")
+        dim = f"{rows}桌×{cols}人" if is_table else f"{rows}×{cols}"
         return (
-            f"已创建区域: {area.name} ({layout_type} {rows}×{cols})"
+            f"已创建区域: {area.name} ({layout_type} {dim})"
             f" 偏移({offset_x},{offset_y})"
             f"\n接下来调用 generate_area_layout 为该区域生成座位。"
         )

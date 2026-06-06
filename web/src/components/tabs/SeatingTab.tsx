@@ -66,6 +66,20 @@ const LAYOUT_OPTIONS: { value: string; label: string; desc: string }[] = [
   { value: 'u_shape', label: 'U 形', desc: '三面围合，适合会议' },
 ];
 
+// Table layouts interpret the two numeric params as (桌数, 每桌人数) instead
+// of (行, 列). Drives the form labels + the area-list summary header.
+const TABLE_LAYOUTS = new Set(['roundtable', 'banquet']);
+const isTableLayout = (layout: string) => TABLE_LAYOUTS.has(layout);
+// Sensible defaults per layout family so switching the dropdown swaps the
+// numbers to something meaningful for that family.
+const GRID_DEFAULTS = { rows: 5, cols: 10 };   // 5 行 × 10 列
+const TABLE_DEFAULTS = { rows: 10, cols: 8 };  // 10 桌 × 8 人
+
+/** Human-readable "5×10" / "10桌×8人" summary for an area. */
+function areaDimLabel(layout: string, rows: number, cols: number): string {
+  return isTableLayout(layout) ? `${rows}桌×${cols}人` : `${rows}×${cols}`;
+}
+
 /** Rotating color palette for auto-generated zone colors */
 const ZONE_COLORS = [
   '#e2b93b', '#4a90d9', '#9b59b6', '#27ae60', '#6b7280',
@@ -146,7 +160,6 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
   const [layoutType, setLayoutType] = useState(event.layout_type || 'grid');
   const [rows, setRows] = useState(event.venue_rows || 5);
   const [cols, setCols] = useState(event.venue_cols || 8);
-  const [tableSize, setTableSize] = useState(8);
   // Assign picker
   const [showAssignPicker, setShowAssignPicker] = useState(false);
   const [assignSearch, setAssignSearch] = useState('');
@@ -248,7 +261,10 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
         layout_type: layoutType,
         rows,
         cols,
-        table_size: tableSize,
+        // For table layouts cols IS the seats-per-table, so the engine
+        // splits rows*cols total seats into tables of `cols` → exactly
+        // `rows` tables of `cols`. Non-table layouts ignore table_size.
+        table_size: isTableLayout(layoutType) ? cols : 8,
       }),
     onSuccess: async () => {
       // Sync rows/cols back to event model
@@ -1308,7 +1324,7 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
               ))}
             </select>
 
-            {/* Rows × Cols */}
+            {/* Rows × Cols  (or  桌数 × 每桌人数  for table layouts) */}
             <div className="flex items-center gap-1 text-sm">
               <input
                 type="number"
@@ -1316,9 +1332,12 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
                 max={50}
                 value={rows}
                 onChange={(e) => setRows(Number(e.target.value))}
+                title={isTableLayout(layoutType) ? '桌数' : '行数'}
                 className="w-14 px-1.5 py-1.5 border border-gray-300 rounded text-center text-sm"
               />
-              <span className="text-gray-400 text-xs">行</span>
+              <span className="text-gray-400 text-xs">
+                {isTableLayout(layoutType) ? '桌' : '行'}
+              </span>
               <span className="text-gray-300">×</span>
               <input
                 type="number"
@@ -1326,24 +1345,15 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
                 max={50}
                 value={cols}
                 onChange={(e) => setCols(Number(e.target.value))}
+                title={isTableLayout(layoutType) ? '每桌人数' : '每行座位数'}
                 className="w-14 px-1.5 py-1.5 border border-gray-300 rounded text-center text-sm"
               />
-              <span className="text-gray-400 text-xs">列</span>
+              <span className="text-gray-400 text-xs">
+                {isTableLayout(layoutType) ? '人/桌' : '列'}
+              </span>
             </div>
-
-            {(layoutType === 'roundtable' || layoutType === 'banquet') && (
-              <div className="flex items-center gap-1 text-sm">
-                <input
-                  type="number"
-                  min={4}
-                  max={16}
-                  value={tableSize}
-                  onChange={(e) => setTableSize(Number(e.target.value))}
-                  className="w-14 px-1.5 py-1.5 border border-gray-300 rounded text-center text-sm"
-                />
-                <span className="text-gray-400 text-xs">人/桌</span>
-              </div>
-            )}
+            {/* Separate 人/桌 control removed for table layouts — cols is now
+                the seats-per-table, so a third number would be redundant. */}
 
             <button
               onClick={() => createLayoutMutation.mutate()}
@@ -1549,7 +1559,8 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
                     <div className="flex items-center gap-2">
                       <span className="font-medium text-gray-700">{a.name}</span>
                       <span className="text-xs text-gray-400">
-                        {a.layout_type} {a.rows}×{a.cols}
+                        {LAYOUT_OPTIONS.find((o) => o.value === a.layout_type)?.label || a.layout_type}{' '}
+                        {areaDimLabel(a.layout_type, a.rows, a.cols)}
                         {a.stage_label && ` · ${a.stage_label}`}
                       </span>
                     </div>
@@ -1589,7 +1600,21 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
                 <label className="text-[11px] text-gray-500">布局</label>
                 <select
                   value={newAreaLayout}
-                  onChange={(e) => setNewAreaLayout(e.target.value)}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    // Swap numeric params to defaults that make sense for the
+                    // new layout family — but only when crossing the
+                    // grid↔table boundary, so a user who already tuned the
+                    // numbers within a family keeps them.
+                    const wasTable = isTableLayout(newAreaLayout);
+                    const nowTable = isTableLayout(next);
+                    if (wasTable !== nowTable) {
+                      const d = nowTable ? TABLE_DEFAULTS : GRID_DEFAULTS;
+                      setNewAreaRows(d.rows);
+                      setNewAreaCols(d.cols);
+                    }
+                    setNewAreaLayout(next);
+                  }}
                   className="block px-1 py-1 border border-gray-300 rounded text-xs"
                 >
                   {LAYOUT_OPTIONS.map((o) => (
@@ -1598,17 +1623,21 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
                 </select>
               </div>
               <div>
-                <label className="text-[11px] text-gray-500">行×列</label>
+                <label className="text-[11px] text-gray-500">
+                  {isTableLayout(newAreaLayout) ? '桌数×每桌人数' : '行×列'}
+                </label>
                 <div className="flex items-center gap-0.5">
                   <input
                     type="number" min={1} max={50} value={newAreaRows}
                     onChange={(e) => setNewAreaRows(Number(e.target.value))}
+                    title={isTableLayout(newAreaLayout) ? '桌数' : '行数'}
                     className="w-12 px-1 py-1 border border-gray-300 rounded text-xs text-center"
                   />
                   <span className="text-gray-400 text-xs">×</span>
                   <input
                     type="number" min={1} max={50} value={newAreaCols}
                     onChange={(e) => setNewAreaCols(Number(e.target.value))}
+                    title={isTableLayout(newAreaLayout) ? '每桌人数' : '每行座位数'}
                     className="w-12 px-1 py-1 border border-gray-300 rounded text-xs text-center"
                   />
                 </div>

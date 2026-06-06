@@ -242,3 +242,42 @@ class TestGenerateLayout:
         rotations = {s.get("rotation", 0) for s in seats}
         # Round tables should have varied rotations
         assert len(rotations) > 1
+
+    def _table_sizes(self, seats):
+        """Group seat count by table prefix (T1, T2, ...)."""
+        counts: dict[str, int] = {}
+        for s in seats:
+            label = s.get("label", "")
+            if "-" in label:
+                counts[label.split("-")[0]] = (
+                    counts.get(label.split("-")[0], 0) + 1
+                )
+        return counts
+
+    def test_roundtable_tables_x_seats_contract(self):
+        """Caller contract: passing table_size == cols makes (rows, cols)
+        mean exactly (n_tables, seats_per_table).
+
+        This is what generate_area_layout / create_layout rely on so the
+        UI can offer 桌数 × 每桌人数 instead of the confusing 行×列.
+        """
+        for n_tables, per_table in [(10, 8), (12, 10), (4, 2), (3, 20)]:
+            seats = generate_layout(
+                "roundtable", n_tables, per_table,
+                table_size=per_table,
+            )
+            assert len(seats) == n_tables * per_table
+            sizes = self._table_sizes(seats)
+            assert len(sizes) == n_tables
+            assert set(sizes.values()) == {per_table}
+
+    def test_banquet_tables_x_seats_contract(self):
+        for n_tables, per_table in [(8, 10), (6, 12), (2, 16)]:
+            seats = generate_layout(
+                "banquet", n_tables, per_table,
+                table_size=per_table,
+            )
+            assert len(seats) == n_tables * per_table
+            sizes = self._table_sizes(seats)
+            assert len(sizes) == n_tables
+            assert set(sizes.values()) == {per_table}

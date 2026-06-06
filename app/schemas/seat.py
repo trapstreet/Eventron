@@ -85,7 +85,10 @@ class LayoutRequest(BaseModel):
     rows: int = Field(..., ge=1, le=100)
     cols: int = Field(..., ge=1, le=100)
     # Layout-specific overrides
-    table_size: int = Field(8, ge=4, le=16, description="Seats per table (roundtable/banquet)")
+    # Wide bound: for table layouts the frontend sends table_size = cols
+    # (seats per table), which can legitimately be small (VIP 4-seat round
+    # table) or large (banquet long table of 20). Keep it in step with cols.
+    table_size: int = Field(8, ge=1, le=100, description="Seats per table (roundtable/banquet)")
     aisle_every: int = Field(0, ge=0, description="Insert aisle every N columns")
     spacing: float = Field(60.0, ge=30, le=120, description="Seat spacing in canvas units")
 
