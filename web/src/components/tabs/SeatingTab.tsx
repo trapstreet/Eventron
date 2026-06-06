@@ -423,6 +423,53 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
     },
   });
 
+  // One-click "整理区域": stack every area vertically with gaps so they
+  // stop overlapping. Computes each area's seat bounding box, then shifts
+  // its seats so areas are left-aligned and laid out top-to-bottom.
+  const autoArrangeMutation = useMutation({
+    mutationFn: async () => {
+      const typedSeats = seats as Seat[];
+      const typedAreas = (areas as VenueArea[])
+        .slice()
+        .sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0));
+
+      const GAP = 160;       // vertical gap between areas
+      const LEFT = 0;        // common left edge
+      let cursorY = 0;
+
+      for (const area of typedAreas) {
+        const areaSeats = typedSeats.filter((s) => s.area_id === area.id);
+        if (areaSeats.length === 0) continue;
+        let minX = Infinity, minY = Infinity, maxY = -Infinity;
+        for (const s of areaSeats) {
+          const x = s.pos_x ?? (s.col_num - 1) * 60;
+          const y = s.pos_y ?? (s.row_num - 1) * 60;
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+        const dx = LEFT - minX;
+        const dy = cursorY - minY;
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+          const seatIds = areaSeats.map((s) => s.id);
+          await apiClient.bulkUpdateSeats(eventId, {
+            seat_ids: seatIds, pos_dx: dx, pos_dy: dy,
+          });
+          await apiClient.updateArea(eventId, area.id, {
+            offset_x: (area.offset_x ?? 0) + dx,
+            offset_y: (area.offset_y ?? 0) + dy,
+          });
+        }
+        cursorY += (maxY - minY) + GAP;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['seats', eventId] });
+      queryClient.invalidateQueries({ queryKey: ['areas', eventId] });
+      setTimeout(() => fitAllRef.current(), 150);
+    },
+  });
+
   const regenAreaMutation = useMutation({
     mutationFn: (areaId: string) => apiClient.generateAreaLayout(eventId, areaId),
     onSuccess: () => {
@@ -894,27 +941,17 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
                 transform={dragging ? `translate(${tx}, ${ty})` : undefined}
                 style={{ opacity: dragging ? 0.7 : 1 }}
               >
-                {/* Area boundary — also the drag handle. Pointer-events
-                    `stroke` means clicks on the dashed border start a drag,
-                    but clicks INSIDE the rect fall through to seats below. */}
+                {/* Area boundary — pure visual (the grab handle is a
+                    separate pill rendered on TOP of the seats, see the
+                    "Area drag handles" layer below — the dashed border
+                    here is too thin to hit and seats render over it). */}
                 <rect
                   x={rx} y={ry} width={rw} height={rh}
-                  rx={6} fill="transparent"
-                  stroke="#cbd5e1" strokeWidth={6}
+                  rx={6} fill="none"
+                  stroke="#cbd5e1" strokeWidth={1}
                   strokeDasharray="8,4"
-                  style={{ cursor: 'move', pointerEvents: 'stroke' }}
-                  onMouseDown={(e) => handleAreaMouseDown(areaId, e)}
+                  style={{ pointerEvents: 'none' }}
                 />
-                {/* Area name label — also draggable */}
-                <text
-                  x={rx + 6} y={ry + 12}
-                  fontSize={11} fontWeight="600"
-                  fill="#64748b"
-                  style={{ cursor: 'move', userSelect: 'none' }}
-                  onMouseDown={(e) => handleAreaMouseDown(areaId, e)}
-                >
-                  {ab.area.name}
-                </text>
                 {/* Per-area stage/backdrop label */}
                 {ab.area.stage_label && (
                   <>
@@ -1043,6 +1080,51 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
                   {seat.zone ? ` [${seat.zone}]` : ''}
                   {att ? ` - ${att.name} (P${att.priority})` : ''}
                 </title>
+              </g>
+            );
+          })}
+
+          {/* Area drag handles — rendered LAST so they sit on top of the
+              seats and stay grabbable even when two areas overlap. Each is
+              a clearly-visible pill at the area's top-left with a grip glyph
+              + the area name. This is the actual drag handle (the dashed
+              boundary above is just decoration). */}
+          {Array.from(areaBounds.entries()).map(([areaId, ab]) => {
+            const pad = 28;
+            const hx = ab.minX - pad;             // handle left = boundary left
+            // Straddle the dashed boundary's top line like a labeled tab
+            // (boundary top is at minY - pad - 16). Keeps it within the
+            // canvas headroom so the topmost area's handle isn't clipped.
+            const hy = ab.minY - pad - 16 - 11;
+            const name = ab.area.name || '区域';
+            const hw = Math.max(64, name.length * 13 + 34);
+            const dragging = areaDrag?.areaId === areaId;
+            const tx = dragging ? areaDrag.delta.dx : 0;
+            const ty = dragging ? areaDrag.delta.dy : 0;
+            return (
+              <g
+                key={`handle-${areaId}`}
+                transform={`translate(${tx}, ${ty})`}
+                style={{ cursor: 'move' }}
+                onMouseDown={(e) => handleAreaMouseDown(areaId, e)}
+              >
+                <title>拖拽此标签移动「{name}」区域</title>
+                <rect
+                  x={hx} y={hy} width={hw} height={22} rx={11}
+                  fill={dragging ? '#4f46e5' : '#6366f1'}
+                  opacity={dragging ? 1 : 0.92}
+                />
+                {/* grip dots */}
+                <text
+                  x={hx + 12} y={hy + 15}
+                  fontSize={13} fill="white"
+                  style={{ pointerEvents: 'none', userSelect: 'none' }}
+                >⠿</text>
+                <text
+                  x={hx + 26} y={hy + 15}
+                  fontSize={11} fontWeight="600" fill="white"
+                  style={{ pointerEvents: 'none', userSelect: 'none' }}
+                >{name}</text>
               </g>
             );
           })}
@@ -1546,9 +1628,22 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
               <h4 className="font-semibold text-gray-800 flex items-center gap-1.5">
                 <Layers size={15} /> 区域管理
               </h4>
-              <button onClick={() => setShowAreaPanel(false)} className="p-1 hover:bg-gray-100 rounded">
-                <X size={14} className="text-gray-400" />
-              </button>
+              <div className="flex items-center gap-1">
+                {(areas as VenueArea[]).length >= 2 && (
+                  <button
+                    onClick={() => autoArrangeMutation.mutate()}
+                    disabled={autoArrangeMutation.isPending}
+                    title="自动把所有区域上下排开，消除重叠"
+                    className="flex items-center gap-1 px-2 py-1 text-xs text-indigo-600 border border-indigo-200 rounded hover:bg-indigo-50 disabled:opacity-50"
+                  >
+                    <Layers size={12} />
+                    {autoArrangeMutation.isPending ? '整理中…' : '整理区域'}
+                  </button>
+                )}
+                <button onClick={() => setShowAreaPanel(false)} className="p-1 hover:bg-gray-100 rounded">
+                  <X size={14} className="text-gray-400" />
+                </button>
+              </div>
             </div>
 
             {/* Existing areas */}
