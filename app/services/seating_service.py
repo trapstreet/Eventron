@@ -362,11 +362,18 @@ class SeatingService:
                 spacing=46.0,
             )
 
-        # Offset specs by area's offset_x/offset_y
+        # Offset specs by area's offset_x/offset_y, and namespace each seat
+        # label with the area name so labels are globally unique across
+        # areas (紫荊席-A1 ≠ 梅花席-A1 ≠ event-level A1). The frontend strips
+        # this prefix for the compact in-seat display but keeps it in the
+        # tooltip / check-in / badges / exports, where uniqueness matters.
+        prefix = (area.name or "").strip()
         for s in specs:
             s["pos_x"] = s.get("pos_x", 0) + area.offset_x
             s["pos_y"] = s.get("pos_y", 0) + area.offset_y
             s["area_id"] = area_id
+            if prefix and s.get("label"):
+                s["label"] = f"{prefix}-{s['label']}"
 
         return await self._seat_repo.bulk_create_from_specs(
             event_id, specs,

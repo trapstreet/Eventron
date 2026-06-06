@@ -1014,9 +1014,20 @@ export function SeatingTab({ eventId, event }: SeatingTabProps) {
             const isSelected =
               selectedSeat?.id === seat.id || selectedSeatIds.has(seat.id);
             const rotation = seat.rotation || 0;
+            // Strip the area-name prefix (紫荊席-A1 → A1) for the compact
+            // in-seat display — the area is already shown by its dashed
+            // boundary + name pill. The full label stays in the tooltip.
+            const rawLabel = seat.label || '';
+            const areaName = seat.area_id
+              ? areaMap.get(seat.area_id)?.name
+              : undefined;
+            const shortLabel =
+              areaName && rawLabel.startsWith(`${areaName}-`)
+                ? rawLabel.slice(areaName.length + 1)
+                : rawLabel;
             const displayLabel = seat.attendee_id
               ? (att?.name?.slice(0, 3) || '✓')
-              : (seat.label || '');
+              : shortLabel;
 
             return (
               <g
